@@ -1,3 +1,18 @@
+"""
+Constants and configurations for the HIT (Humanoid Imitation with Transformers) framework.
+
+This module defines task-specific configurations including dataset paths, camera setups,
+observation and action dimensions, and masking for different body parts in the action space.
+Each task configuration specifies:
+- dataset_dir: Path to the dataset directory
+- camera_names: List of camera views used for observations
+- observation_name: List of observation components to include
+- state_dim: Dimension of the state space
+- action_dim: Dimension of the action space
+- state_mask: Binary mask for state components
+- action_mask: Binary mask for action components (typically segmented by body parts)
+"""
+
 import os
 
 ### Task parameters

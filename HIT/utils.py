@@ -1,3 +1,20 @@
+"""
+Utility functions for the HIT (Humanoid Imitation with Transformers) framework.
+
+This module provides a variety of utility functions for data handling, dataset
+creation, normalization, and processing of actions and observations. Key components:
+
+- EpisodicDataset: PyTorch Dataset for loading and processing episodic data
+- Data loading and normalization functions
+- Batch sampling utilities
+- Action processing and transformation utilities
+- Environment simulation helpers
+- General helper functions for training and evaluation
+
+These utilities support the training and evaluation of policies for humanoid
+imitation learning from demonstrations stored in HDF5 format.
+"""
+
 import numpy as np
 import torch
 import os
@@ -13,9 +30,45 @@ import IPython
 e = IPython.embed
 
 def flatten_list(l):
+    """
+    Flattens a nested list into a single-level list.
+    
+    Args:
+        l: A list of lists
+        
+    Returns:
+        A flattened list containing all elements
+    """
     return [item for sublist in l for item in sublist]
 
 class EpisodicDataset(torch.utils.data.Dataset):
+    """
+    PyTorch Dataset for handling episodic data from HDF5 files.
+    
+    This dataset handles loading observation images, state data, and actions from episodes.
+    It supports various data preprocessing and augmentation options for training
+    imitation learning policies.
+    
+    Args:
+        dataset_path_list: List of paths to dataset files
+        camera_names: List of camera names to include
+        norm_stats: Normalization statistics
+        episode_ids: IDs of episodes to include
+        episode_len: Length of each episode
+        chunk_size: Number of timesteps to include in each sample
+        policy_class: Policy class to use
+        width: Optional image width to resize to
+        height: Optional image height to resize to
+        normalize_resnet: Whether to normalize images for ResNet
+        data_aug: Whether to use data augmentation
+        observation_name: Names of observation fields to include
+        feature_loss: Whether to include future frames for feature loss
+        grayscale: Whether to convert images to grayscale
+        randomize_color: Whether to randomize color channels
+        randomize_index: Indices of actions to randomize
+        randomize_data_degree: Degree of randomization
+        randomize_data: Whether to randomize data
+    """
     def __init__(self, dataset_path_list, camera_names, norm_stats, episode_ids, episode_len, 
                  chunk_size, policy_class,width=None, height=None, normalize_resnet=False,data_aug=False,
                  observation_name=[],feature_loss=False,grayscale=False,randomize_color=False,
@@ -63,6 +116,15 @@ class EpisodicDataset(torch.utils.data.Dataset):
         
         
     def _locate_transition(self, index):
+        """
+        Locate the episode and timestep for a given index.
+        
+        Args:
+            index: Global index in the dataset
+            
+        Returns:
+            tuple: (episode_id, start_ts) - Episode ID and starting timestep
+        """
         assert index < self.cumulative_len[-1]
         episode_index = np.argmax(self.cumulative_len > index) # argmax returns first True index
         start_ts = index - (self.cumulative_len[episode_index] - self.episode_len[episode_index])
@@ -70,6 +132,25 @@ class EpisodicDataset(torch.utils.data.Dataset):
         return episode_id, start_ts
 
     def __getitem__(self, index):
+        """
+        Get a data sample from the dataset.
+        
+        This method:
+        1. Locates the episode and timestep for the given index
+        2. Loads the corresponding observations and actions
+        3. Applies preprocessing (resizing, normalization, augmentation)
+        4. Formats the data as tensors
+        
+        Args:
+            index: Index of the sample to retrieve
+            
+        Returns:
+            tuple: (image_data, qpos_data, action_data, is_pad)
+                - image_data: Preprocessed camera images
+                - qpos_data: Normalized proprioceptive state
+                - action_data: Normalized action sequence
+                - is_pad: Boolean mask for padded timesteps
+        """
         episode_id, start_ts = self._locate_transition(index)
         dataset_path = self.dataset_path_list[episode_id]
         if "flipped" in dataset_path:
@@ -199,7 +280,25 @@ class EpisodicDataset(torch.utils.data.Dataset):
         return image_data, qpos_data, action_data, is_pad
 
 
-def get_norm_stats(dataset_path_list,observation_name=['qpos']):
+def get_norm_stats(dataset_path_list, observation_name=['qpos']):
+    """
+    Computes normalization statistics from dataset files.
+    
+    This function loads actions and observations from HDF5 datasets and computes
+    statistics (mean, standard deviation, min, max) for normalization during training.
+    
+    Args:
+        dataset_path_list: List of paths to dataset files
+        observation_name: Names of observation fields to include
+        
+    Returns:
+        stats: Dictionary of normalization statistics including:
+            - action_mean, action_std: Mean and std of actions
+            - action_min, action_max: Min and max of actions
+            - qpos_mean, qpos_std: Mean and std of proprioceptive state
+            - all_action_v_min, all_action_v_max: Min and max of action velocities
+        all_episode_len: List of episode lengths
+    """
     all_qpos_data = []
     all_action_data = []
     all_action_v_data = []
@@ -263,6 +362,16 @@ def get_norm_stats(dataset_path_list,observation_name=['qpos']):
     return stats, all_episode_len
 
 def find_all_hdf5(dataset_dir, skip_mirrored_data):
+    """
+    Finds all HDF5 files in a directory recursively.
+    
+    Args:
+        dataset_dir: Directory to search
+        skip_mirrored_data: Whether to skip files with 'mirror' in the name
+        
+    Returns:
+        List of paths to HDF5 files
+    """
     hdf5_files = []
     for root, dirs, files in os.walk(dataset_dir):
         for filename in fnmatch.filter(files, '*.hdf5'):
@@ -274,6 +383,17 @@ def find_all_hdf5(dataset_dir, skip_mirrored_data):
     return hdf5_files
 
 def BatchSampler(batch_size, episode_len_l, sample_weights):
+    """
+    Creates batches for training or validation by sampling from episodes.
+    
+    Args:
+        batch_size: Number of samples per batch
+        episode_len_l: List of episode lengths for each dataset
+        sample_weights: Optional weights for sampling from different datasets
+        
+    Yields:
+        List of indices representing a batch
+    """
     sample_probs = np.array(sample_weights) / np.sum(sample_weights) if sample_weights is not None else None
     sum_dataset_len_l = np.cumsum([0] + [np.sum(episode_len) for episode_len in episode_len_l])
     while True:
@@ -290,6 +410,40 @@ def load_data(dataset_dir_l, name_filter, camera_names, batch_size_train, batch_
               width=None, height=None, normalize_resnet=False, data_aug=False,observation_name=[],
               feature_loss=False, grayscale=False, randomize_color=False,
               randomize_index=None,randomize_data_degree=0,randomize_data=False):
+    """
+    Loads and prepares datasets for training and validation.
+    
+    Args:
+        dataset_dir_l: Directory or list of directories containing datasets
+        name_filter: Function to filter dataset filenames
+        camera_names: List of camera names to include in observations
+        batch_size_train: Batch size for training
+        batch_size_val: Batch size for validation
+        chunk_size: Number of timesteps to include in each sample
+        skip_mirrored_data: Whether to skip mirrored data files
+        load_pretrain: Whether to load pretrained normalization stats
+        policy_class: Policy class to use
+        stats_dir_l: Directory or list of directories for normalization statistics
+        sample_weights: Optional weights for sampling from different datasets
+        train_ratio: Ratio of data to use for training vs validation
+        width: Image width to resize to
+        height: Image height to resize to
+        normalize_resnet: Whether to normalize images for ResNet
+        data_aug: Whether to use data augmentation
+        observation_name: Names of observation fields to include
+        feature_loss: Whether to include future frames for feature loss
+        grayscale: Whether to convert images to grayscale
+        randomize_color: Whether to randomize color channels
+        randomize_index: Indices of actions to randomize
+        randomize_data_degree: Degree of randomization
+        randomize_data: Whether to randomize data
+        
+    Returns:
+        train_dataloader: DataLoader for training
+        val_dataloader: DataLoader for validation
+        norm_stats: Normalization statistics
+        is_sim: Whether the environment is simulated
+    """
     if type(dataset_dir_l) == str:
         dataset_dir_l = [dataset_dir_l]
     dataset_path_list_list = [find_all_hdf5(dataset_dir, skip_mirrored_data) for dataset_dir in dataset_dir_l]
@@ -353,6 +507,16 @@ def load_data(dataset_dir_l, name_filter, camera_names, batch_size_train, batch_
     return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
 
 def calibrate_linear_vel(base_action, c=None):
+    """
+    Calibrates linear velocity based on angular velocity.
+    
+    Args:
+        base_action: Base action array with linear and angular velocity
+        c: Calibration coefficient (default: 0.0)
+        
+    Returns:
+        Calibrated base action
+    """
     if c is None:
         c = 0.0 # 0.19
     v = base_action[..., 0]
@@ -362,17 +526,44 @@ def calibrate_linear_vel(base_action, c=None):
     return base_action
 
 def smooth_base_action(base_action):
+    """
+    Smooths base actions using a moving average filter.
+    
+    Args:
+        base_action: Base action array
+        
+    Returns:
+        Smoothed base action
+    """
     return np.stack([
         np.convolve(base_action[:, i], np.ones(5)/5, mode='same') for i in range(base_action.shape[1])
     ], axis=-1).astype(np.float32)
 
 def preprocess_base_action(base_action):
+    """
+    Preprocesses base actions for use in the model.
+    
+    Args:
+        base_action: Base action array
+        
+    Returns:
+        Preprocessed base action
+    """
     # base_action = calibrate_linear_vel(base_action)
     base_action = smooth_base_action(base_action)
 
     return base_action
 
 def postprocess_base_action(base_action):
+    """
+    Postprocesses base actions for execution.
+    
+    Args:
+        base_action: [linear_vel, angular_vel] array
+        
+    Returns:
+        Postprocessed base action
+    """
     linear_vel, angular_vel = base_action
     linear_vel *= 1.0
     angular_vel *= 1.0
@@ -384,6 +575,12 @@ def postprocess_base_action(base_action):
 ### env utils
 
 def sample_box_pose():
+    """
+    Samples a random box pose within specified ranges.
+    
+    Returns:
+        Array containing position and quaternion
+    """
     x_range = [0.0, 0.2]
     y_range = [0.4, 0.6]
     z_range = [0.05, 0.05]
@@ -395,6 +592,13 @@ def sample_box_pose():
     return np.concatenate([cube_position, cube_quat])
 
 def sample_insertion_pose():
+    """
+    Samples random poses for peg and socket within specified ranges.
+    
+    Returns:
+        peg_pose: Array containing peg position and quaternion
+        socket_pose: Array containing socket position and quaternion
+    """
     # Peg
     x_range = [0.1, 0.2]
     y_range = [0.4, 0.6]
@@ -422,6 +626,15 @@ def sample_insertion_pose():
 ### helper functions
 
 def compute_dict_mean(epoch_dicts):
+    """
+    Computes mean values across a list of dictionaries with the same keys.
+    
+    Args:
+        epoch_dicts: List of dictionaries with numeric values
+        
+    Returns:
+        Dictionary with mean values
+    """
     result = {k: None for k in epoch_dicts[0]}
     num_items = len(epoch_dicts)
     for k in result:
@@ -432,11 +645,26 @@ def compute_dict_mean(epoch_dicts):
     return result
 
 def detach_dict(d):
+    """
+    Detaches all PyTorch tensors in a dictionary.
+    
+    Args:
+        d: Dictionary containing PyTorch tensors
+        
+    Returns:
+        Dictionary with detached tensors
+    """
     new_d = dict()
     for k, v in d.items():
         new_d[k] = v.detach()
     return new_d
 
 def set_seed(seed):
+    """
+    Sets random seeds for reproducibility.
+    
+    Args:
+        seed: Random seed value
+    """
     torch.manual_seed(seed)
     np.random.seed(seed)

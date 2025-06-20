@@ -1,3 +1,29 @@
+"""
+Policy implementations for the HIT (Humanoid Imitation with Transformers) framework.
+
+This module implements various policy architectures for imitation learning:
+- HITPolicy: The main Humanoid Imitation with Transformers policy
+- ACTPolicy: Action Chunking Transformer policy
+- CNNMLPPolicy: Convolutional Neural Network + MLP policy
+- DiffusionPolicy: Diffusion-based policy
+
+These policies take visual observations and proprioceptive states as input and
+predict actions for controlling a humanoid robot.
+"""
+
+"""
+Policy implementations for the HIT (Humanoid Imitation with Transformers) framework.
+
+This module implements various policy architectures for imitation learning:
+- HITPolicy: The main Humanoid Imitation with Transformers policy
+- ACTPolicy: Action Chunking Transformer policy
+- CNNMLPPolicy: Convolutional Neural Network + MLP policy
+- DiffusionPolicy: Diffusion-based policy
+
+These policies take visual observations and proprioceptive states as input and
+predict actions for controlling a humanoid robot.
+"""
+
 import torch.nn as nn
 from torch.nn import functional as F
 import torchvision.transforms as transforms
