@@ -91,7 +91,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         self.randomize_data = randomize_data
         self.randomize_data_radian = randomize_data_degree/180*np.pi
         self.randomize_index = randomize_index
-        self.grayscale = grayscale
+        self.grayscale = grayscale;
         self.randomize_color = randomize_color
         if self.data_aug:
             #has nothing to do with the deployment of the model 
@@ -105,7 +105,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
   
         self.normalize_resnet = normalize_resnet
         if self.normalize_resnet:
-            #need to normalize the image to the same mean and std as the resnet model during depolyment
+            #need to normalize the image to the same mean and std as the resnet model during deployment
             self.normalize_resnet_tf = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             
         self.observation_name = observation_name
@@ -396,6 +396,7 @@ def BatchSampler(batch_size, episode_len_l, sample_weights):
     """
     sample_probs = np.array(sample_weights) / np.sum(sample_weights) if sample_weights is not None else None
     sum_dataset_len_l = np.cumsum([0] + [np.sum(episode_len) for episode_len in episode_len_l])
+    print(f"==>> sum_dataset_len_l: {sum_dataset_len_l}")
     while True:
         batch = []
         for _ in range(batch_size):
@@ -451,6 +452,7 @@ def load_data(dataset_dir_l, name_filter, camera_names, batch_size_train, batch_
     dataset_path_list = flatten_list(dataset_path_list_list)
     dataset_path_list = [n for n in dataset_path_list if name_filter(n)]
     dataset_path_list = sorted(dataset_path_list)
+    print(f"==>> dataset_path_list: {dataset_path_list}")
     num_episodes_l = [len(dataset_path_list) for dataset_path_list in dataset_path_list_list]
     num_episodes_cumsum = np.cumsum(num_episodes_l)
 
@@ -463,6 +465,7 @@ def load_data(dataset_dir_l, name_filter, camera_names, batch_size_train, batch_
     print(f'val_episode_ids_0: {val_episode_ids_0}')
     
     train_episode_ids_l = [train_episode_ids_0] + [np.arange(num_episodes) + num_episodes_cumsum[idx] for idx, num_episodes in enumerate(num_episodes_l[1:])]
+    print(f"==>> train_episode_ids_l: {train_episode_ids_l}")
     val_episode_ids_l = [val_episode_ids_0]
     train_episode_ids = np.concatenate(train_episode_ids_l)
     val_episode_ids = np.concatenate(val_episode_ids_l)
@@ -476,7 +479,9 @@ def load_data(dataset_dir_l, name_filter, camera_names, batch_size_train, batch_
     #     print('Loaded pretrain dataset stats')
     _, all_episode_len = get_norm_stats(dataset_path_list,observation_name=observation_name)
     train_episode_len_l = [[all_episode_len[i] for i in train_episode_ids] for train_episode_ids in train_episode_ids_l]
+    print(f"==>> train_episode_len_l: {train_episode_len_l}")
     val_episode_len_l = [[all_episode_len[i] for i in val_episode_ids] for val_episode_ids in val_episode_ids_l]
+    print(f"==>> val_episode_len_l: {val_episode_len_l}")
     train_episode_len = flatten_list(train_episode_len_l)
     val_episode_len = flatten_list(val_episode_len_l)
     if stats_dir_l is None:
@@ -505,6 +510,179 @@ def load_data(dataset_dir_l, name_filter, camera_names, batch_size_train, batch_
     val_dataloader = DataLoader(val_dataset, batch_sampler=batch_sampler_val, pin_memory=True, num_workers=val_num_workers, prefetch_factor=2)
 
     return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
+
+def load_lerobot_data(repo_id, camera_names, batch_size_train, batch_size_val, 
+                    chunk_size, policy_class=None, train_ratio=0.9, 
+                    width=None, height=None, normalize_resnet=False, data_aug=False,
+                    observation_name=[], feature_loss=False, grayscale=False, 
+                    randomize_color=False, randomize_index=None, 
+                    randomize_data_degree=0, randomize_data=False):
+    """
+    Loads and prepares datasets from LeRobot format for training and validation.
+    
+    Args:
+        repo_id: Repository ID for the LeRobot dataset (e.g. 'username/dataset_name')
+        camera_names: List of camera names to include in observations
+        batch_size_train: Batch size for training
+        batch_size_val: Batch size for validation
+        chunk_size: Number of timesteps to include in each sample
+        policy_class: Policy class to use
+        train_ratio: Ratio of data to use for training vs validation
+        width: Image width to resize to
+        height: Image height to resize to
+        normalize_resnet: Whether to normalize images for ResNet
+        data_aug: Whether to use data augmentation
+        observation_name: Names of observation fields to include
+        feature_loss: Whether to include future frames for feature loss
+        grayscale: Whether to convert images to grayscale
+        randomize_color: Whether to randomize color channels
+        randomize_index: Indices of actions to randomize
+        randomize_data_degree: Degree of randomization
+        randomize_data: Whether to randomize data
+        
+    Returns:
+        train_dataloader: DataLoader for training
+        val_dataloader: DataLoader for validation
+        norm_stats: Normalization statistics
+        is_sim: Whether the environment is simulated
+    """
+    try:
+        from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+    except ImportError:
+        raise ImportError(
+            "LeRobot package is required to load LeRobot format data. "
+            "Please install it with: pip install lerobot"
+        )
+    
+    # Load the LeRobot dataset
+    lerobot_dataset = LeRobotDataset(repo_id)
+    
+    # Load HF dataset which contains observations, states, actions, etc.
+    hf_dataset = lerobot_dataset.load_hf_dataset()
+    
+    # Convert LeRobot dataset to HIT-compatible format
+    all_episode_len = []
+    dataset_path_list = []
+    episode_ids = []
+    
+    # Create a temporary directory structure to store converted data if needed
+    import tempfile
+    import h5py
+    import os
+    from pathlib import Path
+    
+    temp_dir = Path(tempfile.mkdtemp())
+    
+    # Get all episodes
+    episode_indices = sorted(lerobot_dataset.episodes.keys())
+    num_episodes = len(episode_indices)
+    
+    # Split into train and validation sets
+    train_size = int(train_ratio * num_episodes)
+    train_episode_indices = episode_indices[:train_size]
+    val_episode_indices = episode_indices[train_size:]
+    
+    # Group data by episodes
+    grouped_data = {}
+    for i, idx in enumerate(episode_indices):
+        episode_data = hf_dataset.filter(lambda x: x['episode_index'] == idx)
+        grouped_data[idx] = episode_data
+        all_episode_len.append(len(episode_data))
+        episode_ids.append(i)
+        
+        # Create an HDF5 file for each episode
+        h5_path = temp_dir / f"episode_{i:05d}.hdf5"
+        dataset_path_list.append(str(h5_path))
+        
+        with h5py.File(h5_path, 'w') as f:
+            # Store actions
+            actions = np.stack([sample['action'] for sample in episode_data])
+            f.create_dataset('/action', data=actions)
+            
+            # Store observations (qpos or other state data)
+            obs_group = f.create_group('/observations')
+            for name in observation_name:
+                if name in episode_data.features:
+                    obs_data = np.stack([sample[name] for sample in episode_data])
+                    obs_group.create_dataset(name, data=obs_data)
+            
+            # Store images
+            if 'image' in episode_data.features:
+                img_group = obs_group.create_group('images')
+                for cam_name in camera_names:
+                    if cam_name in episode_data.features:
+                        imgs = np.stack([sample[cam_name] for sample in episode_data])
+                        img_group.create_dataset(cam_name, data=imgs)
+    
+    # Compute normalization statistics for actions and qpos
+    actions_all = []
+    qpos_all = []
+    
+    for episode_data in grouped_data.values():
+        actions = np.stack([sample['action'] for sample in episode_data])
+        actions_all.append(actions)
+        
+        # Collect qpos or other state data for normalization
+        if observation_name:
+            obs_data = []
+            for name in observation_name:
+                if name in episode_data.features:
+                    obs = np.stack([sample[name] for sample in episode_data])
+                    obs_data.append(obs)
+            if obs_data:
+                qpos = np.concatenate(obs_data, axis=-1)
+                qpos_all.append(qpos)
+    
+    actions_all = np.concatenate(actions_all, axis=0)
+    qpos_all = np.concatenate(qpos_all, axis=0) if qpos_all else np.zeros((len(actions_all), 1))
+    
+    # Compute normalization statistics
+    norm_stats = {
+        "action_mean": np.mean(actions_all, axis=0),
+        "action_std": np.std(actions_all, axis=0) + 1e-8,
+        "action_min": np.min(actions_all, axis=0),
+        "action_max": np.max(actions_all, axis=0),
+        "qpos_mean": np.mean(qpos_all, axis=0),
+        "qpos_std": np.std(qpos_all, axis=0) + 1e-8,
+    }
+    
+    # Create train and validation episode IDs
+    train_episode_ids = np.array([i for i, idx in enumerate(episode_indices) if idx in train_episode_indices])
+    val_episode_ids = np.array([i for i, idx in enumerate(episode_indices) if idx in val_episode_indices])
+    
+    # Get episode lengths
+    train_episode_len = [all_episode_len[i] for i in train_episode_ids]
+    val_episode_len = [all_episode_len[i] for i in val_episode_ids]
+    
+    # Create batch samplers
+    batch_sampler_train = BatchSampler(batch_size_train, [train_episode_len], None)
+    batch_sampler_val = BatchSampler(batch_size_val, [val_episode_len], None)
+    
+    # Create datasets
+    train_dataset = EpisodicDataset(
+        dataset_path_list, camera_names, norm_stats, train_episode_ids, train_episode_len, chunk_size, 
+        policy_class, width=width, height=height, normalize_resnet=normalize_resnet, data_aug=data_aug,
+        observation_name=observation_name, feature_loss=feature_loss, grayscale=grayscale, 
+        randomize_color=randomize_color, randomize_index=randomize_index,
+        randomize_data_degree=randomize_data_degree, randomize_data=randomize_data
+    )
+    
+    val_dataset = EpisodicDataset(
+        dataset_path_list, camera_names, norm_stats, val_episode_ids, val_episode_len, chunk_size, 
+        policy_class, width=width, height=height, normalize_resnet=normalize_resnet, data_aug=False,
+        observation_name=observation_name, feature_loss=False, grayscale=grayscale, randomize_color=False
+    )
+    
+    # Create dataloaders
+    train_num_workers = 8 if train_dataset.data_aug else 8
+    val_num_workers = 8 if train_dataset.data_aug else 8
+    print(f'Augment images: {train_dataset.data_aug}, train_num_workers: {train_num_workers}, val_num_workers: {val_num_workers}')
+    train_dataloader = DataLoader(train_dataset, batch_sampler=batch_sampler_train, pin_memory=True, num_workers=train_num_workers, prefetch_factor=2)
+    val_dataloader = DataLoader(val_dataset, batch_sampler=batch_sampler_val, pin_memory=True, num_workers=val_num_workers, prefetch_factor=2)
+    
+    is_sim = False  # Assuming real robot data by default
+    
+    return train_dataloader, val_dataloader, norm_stats, is_sim
 
 def calibrate_linear_vel(base_action, c=None):
     """

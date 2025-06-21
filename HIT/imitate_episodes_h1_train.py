@@ -26,7 +26,7 @@ from tqdm import tqdm
 import json
 import wandb
 
-from utils import compute_dict_mean, set_seed, load_data  # data functions
+from utils import compute_dict_mean, set_seed, load_data, load_lerobot_data  # data functions
 from constants import TASK_CONFIGS
 from model_util import make_policy, make_optimizer
 
@@ -53,6 +53,11 @@ def forward_pass(data, policy):
         action_data.cuda(),
         is_pad.cuda(),
     )
+    print(f"==>> image_data.shape: {image_data.shape}")
+    print(f"==>> action_data.shape: {action_data.shape}")
+    print(f"==>> is_pad.shape: {is_pad.shape}")
+    print(f"==>> qpos_data.shape: {qpos_data.shape}")
+    
     return policy(qpos_data, image_data, action_data, is_pad)  # TODO remove None
 
 
@@ -394,41 +399,187 @@ def main_train(args):
     with open(all_config_path, "w") as fp:
         json.dump(all_configs, fp, indent=4)
 
-    train_dataloader, val_dataloader, stats, _ = load_data(
-        dataset_dir,
-        name_filter,
-        camera_names,
-        batch_size_train,
-        batch_size_val,
-        args["chunk_size"],
-        args["skip_mirrored_data"],
-        config["load_pretrain"],
-        policy_class,
-        stats_dir_l=stats_dir,
-        sample_weights=sample_weights,
-        train_ratio=train_ratio,
-        width=args["width"],
-        height=args["height"],
-        normalize_resnet=args["normalize_resnet"],
-        data_aug=args["data_aug"],
-        observation_name=task_config["observation_name"],
-        feature_loss=args["feature_loss_weight"] > 0,
-        grayscale=args["grayscale"],
-        randomize_color=args["randomize_color"],
-        randomize_data_degree=args["randomize_data_degree"],
-        randomize_data=args["randomize_data"],
-        randomize_index=randomize_index,
-    )
+    # Load datasets
+    if args.data_format == 'lerobot' and args.repo_id:
+        print(f"Loading data from LeRobot format, repo_id: {args.repo_id}")
+        train_dataloader, val_dataloader, norm_stats, is_sim = load_lerobot_data(
+            args.repo_id,
+            config['camera_names'],
+            config['batch_size_train'],
+            config['batch_size_val'],
+            config['chunk_size'],
+            args.policy_class,
+            train_ratio=0.9,
+            width=config.get('width'),
+            height=config.get('height'),
+            normalize_resnet=config.get('normalize_resnet', False),
+            data_aug=config.get('data_aug', False),
+            observation_name=config.get('observation_name', []),
+            feature_loss=config.get('feature_loss', False),
+            grayscale=config.get('grayscale', False),
+            randomize_color=config.get('randomize_color', False),
+            randomize_index=config.get('randomize_index'),
+            randomize_data_degree=config.get('randomize_data_degree', 0),
+            randomize_data=config.get('randomize_data', False)
+        )
+    else:
+        print("Loading data from HDF5 format")
+        train_dataloader, val_dataloader, norm_stats, is_sim = load_data(
+            config['dataset_dir'],
+            config['name_filter'],
+            config['camera_names'],
+            config['batch_size_train'],
+            config['batch_size_val'],
+            config['chunk_size'],
+            skip_mirrored_data=config.get('skip_mirrored_data', False),
+            load_pretrain=config.get('load_pretrain', False),
+            policy_class=args.policy_class,
+            stats_dir_l=config.get('stats_dir_l', None),
+            sample_weights=config.get('sample_weights', None),
+            train_ratio=config.get('train_ratio', 0.99),
+            width=config.get('width'),
+            height=config.get('height'),
+            normalize_resnet=config.get('normalize_resnet', False),
+            data_aug=config.get('data_aug', False),
+            observation_name=config.get('observation_name', []),
+            feature_loss=config.get('feature_loss', False),
+            grayscale=config.get('grayscale', False),
+            randomize_color=config.get('randomize_color', False),
+            randomize_index=config.get('randomize_index'),
+            randomize_data_degree=config.get('randomize_data_degree', 0),
+            randomize_data=config.get('randomize_data', False)
+        )
 
-    # save dataset stats
-    stats_path = os.path.join(ckpt_dir, f"dataset_stats.pkl")
-    with open(stats_path, "wb") as f:
-        pickle.dump(stats, f)
+    # Print sample data information
+    for data_batch in train_dataloader:
+        image_data, qpos_data, action_data, is_pad = data_batch
+        print(f"Sample batch shapes:")
+        print(f"- image_data: {image_data.shape}")
+        print(f"- qpos_data: {qpos_data.shape}")
+        print(f"- action_data: {action_data.shape}")
+        print(f"- is_pad: {is_pad.shape}")
+        break
 
+    # Train the model
     best_ckpt_info = train_bc(train_dataloader, val_dataloader, config)
     best_step, min_val_loss, best_state_dict = best_ckpt_info
 
-    # save best checkpoint
+    # Save best checkpoint
+    ckpt_path = os.path.join(ckpt_dir, f"policy_best.ckpt")
+    torch.save(best_state_dict, ckpt_path)
+    print(f"Best ckpt, val loss {min_val_loss:.6f} @ step{best_step}")
+    if args["wandb"]:
+        wandb.finish()
+
+
+def main():
+    """
+    Main function for training HIT models. Handles argument parsing and training setup.
+    """
+    parser = argparse.ArgumentParser(description='HIT Training Script')
+    parser.add_argument('--task', type=str, default='rearrange_objects', choices=list(TASK_CONFIGS.keys()), 
+                        help='Task to train on')
+    parser.add_argument('--policy_class', type=str, default='HIT', choices=['HIT', 'ACT'], 
+                        help='Policy class to use')
+    parser.add_argument('--use_wandb', action='store_true', 
+                        help='Whether to use wandb for logging')
+    parser.add_argument('--seed', type=int, default=0, 
+                        help='Random seed')
+    parser.add_argument('--data_format', type=str, default='hdf5', choices=['hdf5', 'lerobot'],
+                        help='Data format to use (hdf5 or lerobot)')
+    parser.add_argument('--repo_id', type=str, default=None,
+                        help='Repository ID for LeRobot datasets (required when data_format is lerobot)')
+    args = parser.parse_args()
+
+    task_config = TASK_CONFIGS[args.task]
+    config = deepcopy(task_config['train_config'])
+    config['policy_class'] = args.policy_class
+    config['policy_config'] = task_config['policy_config']
+    config['seed'] = args.seed
+    set_seed(config['seed'])
+
+    # Set up experiment directory
+    exp_name = f"{args.task}_{args.policy_class}_{config['policy_config'].get('backbone', '')}_qpos_{config['seed']}"
+    save_dir = os.path.expanduser(f"./rearrange_objects/{exp_name}/")
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    config['ckpt_dir'] = save_dir
+    print(f'Experiment directory: {save_dir}')
+
+    if args.use_wandb:
+        wandb.init(
+            project=config.get('wandb_project', 'HIT'),
+            entity=config.get('wandb_entity', None),
+            config=config,
+            name=exp_name,
+        )
+
+    # Load datasets
+    if args.data_format == 'lerobot' and args.repo_id:
+        print(f"Loading data from LeRobot format, repo_id: {args.repo_id}")
+        train_dataloader, val_dataloader, norm_stats, is_sim = load_lerobot_data(
+            args.repo_id,
+            config['camera_names'],
+            config['batch_size_train'],
+            config['batch_size_val'],
+            config['chunk_size'],
+            args.policy_class,
+            train_ratio=0.9,
+            width=config.get('width'),
+            height=config.get('height'),
+            normalize_resnet=config.get('normalize_resnet', False),
+            data_aug=config.get('data_aug', False),
+            observation_name=config.get('observation_name', []),
+            feature_loss=config.get('feature_loss', False),
+            grayscale=config.get('grayscale', False),
+            randomize_color=config.get('randomize_color', False),
+            randomize_index=config.get('randomize_index'),
+            randomize_data_degree=config.get('randomize_data_degree', 0),
+            randomize_data=config.get('randomize_data', False)
+        )
+    else:
+        print("Loading data from HDF5 format")
+        train_dataloader, val_dataloader, norm_stats, is_sim = load_data(
+            config['dataset_dir'],
+            config['name_filter'],
+            config['camera_names'],
+            config['batch_size_train'],
+            config['batch_size_val'],
+            config['chunk_size'],
+            skip_mirrored_data=config.get('skip_mirrored_data', False),
+            load_pretrain=config.get('load_pretrain', False),
+            policy_class=args.policy_class,
+            stats_dir_l=config.get('stats_dir_l', None),
+            sample_weights=config.get('sample_weights', None),
+            train_ratio=config.get('train_ratio', 0.99),
+            width=config.get('width'),
+            height=config.get('height'),
+            normalize_resnet=config.get('normalize_resnet', False),
+            data_aug=config.get('data_aug', False),
+            observation_name=config.get('observation_name', []),
+            feature_loss=config.get('feature_loss', False),
+            grayscale=config.get('grayscale', False),
+            randomize_color=config.get('randomize_color', False),
+            randomize_index=config.get('randomize_index'),
+            randomize_data_degree=config.get('randomize_data_degree', 0),
+            randomize_data=config.get('randomize_data', False)
+        )
+
+    # Print sample data information
+    for data_batch in train_dataloader:
+        image_data, qpos_data, action_data, is_pad = data_batch
+        print(f"Sample batch shapes:")
+        print(f"- image_data: {image_data.shape}")
+        print(f"- qpos_data: {qpos_data.shape}")
+        print(f"- action_data: {action_data.shape}")
+        print(f"- is_pad: {is_pad.shape}")
+        break
+
+    # Train the model
+    best_ckpt_info = train_bc(train_dataloader, val_dataloader, config)
+    best_step, min_val_loss, best_state_dict = best_ckpt_info
+
+    # Save best checkpoint
     ckpt_path = os.path.join(ckpt_dir, f"policy_best.ckpt")
     torch.save(best_state_dict, ckpt_path)
     print(f"Best ckpt, val loss {min_val_loss:.6f} @ step{best_step}")
@@ -585,7 +736,4 @@ if __name__ == "__main__":
     # torch.cuda.set_device(args.gpu_id)
     PROJECT_NAME = "H1"
     WANDB_USERNAME = "ha-thienloc131"
-    wandb.login(
-        key="KEY"
-    )
     main_train(vars(args))
